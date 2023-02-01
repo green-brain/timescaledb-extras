@@ -119,6 +119,8 @@ $$ LANGUAGE PLPGSQL VOLATILE;
 -- delete_from_staging specifies whether we should delete from the staging table as we go or leave rows there
 -- compression_job_push_interval specifies how long push out the compression job as we are running, ie the max amount of time you expect the backfill to take
 -- on_conflict_update_columns is an array of columns to use in the update clause when a conflict arises and the on_conflict_action is set to 'Update'
+-- replace_dest_data specifies if data from destination needs to be replaced i.e. deleted and reinserted as backfill
+-- replace_dest_metric_column the metric column name e.g. 'cpu'. (required if replace_dest_data is true)
 CREATE OR REPLACE PROCEDURE decompress_backfill(staging_table regclass, 
     destination_hypertable regclass, 
     on_conflict_action text DEFAULT 'NOTHING', 
@@ -126,7 +128,10 @@ CREATE OR REPLACE PROCEDURE decompress_backfill(staging_table regclass,
     compression_job_push_interval interval DEFAULT '1 day',
     on_conflict_update_columns text[] DEFAULT '{}',
     skip_empty_ranges boolean DEFAULT false,
-    on_conflict_target text DEFAULT '')
+    on_conflict_target text DEFAULT '',
+    replace_dest_data bool DEFAULT false,
+    replace_dest_metric_column text DEFAULT ''
+    )
 AS $proc$
 DECLARE
     source text := staging_table::text; -- Forms a properly quoted table name from our regclass
@@ -154,6 +159,8 @@ DECLARE
     chunks_decompressed bool;
 
     current_slice_has_rows boolean := true;
+
+    unformatted_replace_stmt text ;
     
 BEGIN
     SELECT (get_schema_and_table_name(destination_hypertable)).* INTO STRICT dest_nspname, dest_relname;
@@ -252,6 +259,35 @@ BEGIN
 
         -- decompress the chunks in the dimension slice, committing transactions after each decompress
         CALL decompress_dimension_slice(dimension_slice_row, chunks_decompressed);
+
+        --  replace destination data
+        IF replace_dest_data THEN
+            unformatted_replace_stmt = $$
+                DELETE FROM %1$s -- dest table
+                WHERE %2$s in -- metric column
+                    -- get distinct list of metrics
+                    (SELECT %2$s -- metric column
+                    FROM %3$s -- source table
+                    WHERE %4$s >= %5$s -- time column >= range start
+                    AND %4$s < %6$s -- time column < range end
+                    GROUP BY %2$s) -- metric column
+                AND %4$s >= %5$s -- time column >= range start
+                AND %4$s < %6$s -- time column < range end
+                $$;
+
+            EXECUTE FORMAT(
+                unformatted_replace_stmt
+                , dest 
+                , replace_dest_metric_column
+                , source 
+                , dimension_row.column_name
+                , r_start 
+                , r_end
+                );
+            GET DIAGNOSTICS affected = ROW_COUNT;
+            RAISE NOTICE '% rows deleted from destination in range % to %', affected, r_start, r_end ;
+        END IF
+
 
         EXECUTE FORMAT(unformatted_move_stmt
             , source 
