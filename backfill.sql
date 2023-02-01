@@ -161,6 +161,10 @@ DECLARE
     current_slice_has_rows boolean := true;
 
     unformatted_replace_stmt text ;
+    src_r_start text := NULL;
+    src_r_end text := NULL;
+    del_r_start text := NULL;
+    del_r_end text := NULL;
     
 BEGIN
     SELECT (get_schema_and_table_name(destination_hypertable)).* INTO STRICT dest_nspname, dest_relname;
@@ -262,17 +266,24 @@ BEGIN
 
         --  replace destination data
         IF replace_dest_data THEN
+			src_r_start = _timescaledb_internal.time_literal_sql(min_time_internal, dimension_row.column_type);
+			src_r_end = _timescaledb_internal.time_literal_sql(max_time_internal, dimension_row.column_type);
+            
+            -- delete only data within source's range
+            del_r_start = GREATEST(src_r_start, r_start);
+            del_r_end = LEAST(src_r_end, r_end);
+            
             unformatted_replace_stmt = $$
                 DELETE FROM %1$s -- dest table
                 WHERE %2$s in -- metric column
                     -- get distinct list of metrics
                     (SELECT %2$s -- metric column
                     FROM %3$s -- source table
-                    WHERE %4$s >= %5$s -- time column >= range start
-                    AND %4$s < %6$s -- time column < range end
+                    WHERE %4$s >= %5$s -- time column >= delete range start
+                    AND %4$s < %6$s -- time column < delete range end
                     GROUP BY %2$s) -- metric column
-                AND %4$s >= %5$s -- time column >= range start
-                AND %4$s < %6$s -- time column < range end
+                AND %4$s >= %5$s -- time column >= delete range start
+                AND %4$s < %6$s -- time column < delete range end
                 $$;
 
             EXECUTE FORMAT(
@@ -281,12 +292,12 @@ BEGIN
                 , replace_dest_metric_column
                 , source 
                 , dimension_row.column_name
-                , r_start 
-                , r_end
+                , del_r_start 
+                , del_r_end
                 );
             GET DIAGNOSTICS affected = ROW_COUNT;
-            RAISE NOTICE '% rows deleted from destination in range % to %', affected, r_start, r_end ;
-        END IF
+            RAISE NOTICE '% rows deleted from destination in range % to %', affected, del_r_start, del_r_end ;
+        END IF;
 
 
         EXECUTE FORMAT(unformatted_move_stmt
