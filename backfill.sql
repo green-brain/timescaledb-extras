@@ -126,7 +126,7 @@ CREATE OR REPLACE PROCEDURE decompress_backfill(staging_table regclass,
     destination_hypertable regclass, 
     on_conflict_action text DEFAULT 'NOTHING', 
     delete_from_staging bool DEFAULT true, 
-	compression_job_push bool DEFAULT true,
+    compression_job_push bool DEFAULT true,
     compression_job_push_interval interval DEFAULT '1 day',
     on_conflict_update_columns text[] DEFAULT '{}',
     skip_empty_ranges boolean DEFAULT false,
@@ -163,13 +163,13 @@ DECLARE
     current_slice_has_rows boolean := true;
 
     unformatted_replace_stmt text ;
-	unformatted_src_data_range_stmt text ;
+    unformatted_src_data_range_stmt text ;
     src_r_start text := NULL;
     src_r_end text := NULL;
     del_r_start text := NULL;
     del_r_end text := NULL;
-	del_r_end_dir text := NULL;
-	metric_id int:= NULL;
+    del_r_end_dir text := NULL;
+    metric_id int:= NULL;
     
 BEGIN
     SELECT (get_schema_and_table_name(destination_hypertable)).* INTO STRICT dest_nspname, dest_relname;
@@ -188,9 +188,9 @@ BEGIN
     -- Push the compression job out for some period of time so we don't end up compressing a decompressed chunk 
     -- Don't disable completely because at least then if we fail and fail to move it back things won't get completely weird
     IF compression_job_push THEN
-		SELECT move_compression_job(hypertable_row.id, hypertable_row.schema_name, hypertable_row.table_name, now() + compression_job_push_interval) INTO old_compression_job_time;
-		COMMIT;
-	END IF;
+        SELECT move_compression_job(hypertable_row.id, hypertable_row.schema_name, hypertable_row.table_name, now() + compression_job_push_interval) INTO old_compression_job_time;
+        COMMIT;
+    END IF;
 
     --Get the min and max times in timescale internal format from the source table, this will tell us which chunks we need to decompress
     EXECUTE FORMAT($$SELECT _timescaledb_internal.time_to_internal(min(%1$I)) , 
@@ -223,34 +223,34 @@ BEGIN
             %6$s -- ON CONFLICT CLAUSE if it exists
             $$;
     END IF;
-	
-	-- setup replace statement
-	unformatted_replace_stmt = $$
-		DELETE FROM %1$s -- dest table
-		WHERE %2$s = %3$s -- metric column and value
-		AND %4$s >= %5$s -- time column >= delete range start
-		AND %4$s %7$s %6$s -- time column < or <= delete range end
-	$$;
+    
+    -- setup replace statement
+    unformatted_replace_stmt = $$
+        DELETE FROM %1$s -- dest table
+        WHERE %2$s = %3$s -- metric column and value
+        AND %4$s >= %5$s -- time column >= delete range start
+        AND %4$s %7$s %6$s -- time column < or <= delete range end
+    $$;
 
-	
-	IF replace_dest_data THEN
-		-- source data information statement
-		DROP TABLE IF EXISTS temp_tbl_src_data_range;
-		unformatted_src_data_range_stmt = $$
-			CREATE TEMP TABLE temp_tbl_src_data_range AS
-			SELECT 
-				%1$s, -- metric column
-				_timescaledb_internal.time_to_internal(min(%2$s)) as min, -- time column
-				_timescaledb_internal.time_to_internal(max(%2$s)) as max  -- time column
-			FROM %3$s -- source table
-			GROUP BY %1$s -- metric column
-			$$;
-		EXECUTE FORMAT(unformatted_src_data_range_stmt
-		   , replace_dest_metric_column
-		   , dimension_row.column_name
-		   , source						  
-		  );
-	END IF;
+    
+    IF replace_dest_data THEN
+        -- source data information statement
+        DROP TABLE IF EXISTS temp_tbl_src_data_range;
+        unformatted_src_data_range_stmt = $$
+            CREATE TEMP TABLE temp_tbl_src_data_range AS
+            SELECT 
+                %1$s, -- metric column
+                _timescaledb_internal.time_to_internal(min(%2$s)) as min, -- time column
+                _timescaledb_internal.time_to_internal(max(%2$s)) as max  -- time column
+            FROM %3$s -- source table
+            GROUP BY %1$s -- metric column
+            $$;
+        EXECUTE FORMAT(unformatted_src_data_range_stmt
+           , replace_dest_metric_column
+           , dimension_row.column_name
+           , source                          
+          );
+    END IF;
 
     IF UPPER(on_conflict_action) = 'NOTHING' THEN
         on_conflict_clause = 'ON CONFLICT DO NOTHING';
@@ -300,43 +300,43 @@ BEGIN
         CALL decompress_dimension_slice(dimension_slice_row, chunks_decompressed);
 
         --  replace destination data
-        IF replace_dest_data THEN			
-			-- for each metric, clear data for its range
-			FOR metric_id IN 
-				EXECUTE FORMAT('SELECT %1$s FROM temp_tbl_src_data_range', replace_dest_metric_column)
-			LOOP
-				EXECUTE FORMAT('
-				   SELECT 
-					_timescaledb_internal.time_literal_sql(min, ''%3$s'') as min, 
-					_timescaledb_internal.time_literal_sql(max, ''%3$s'') as max
-					FROM temp_tbl_src_data_range 
-					WHERE %1$s = %2$s
-					LIMIT 1'
-				   , replace_dest_metric_column
-				   , metric_id
-				   , dimension_row.column_type)
-				INTO src_r_start, src_r_end;
+        IF replace_dest_data THEN            
+            -- for each metric, clear data for its range
+            FOR metric_id IN 
+                EXECUTE FORMAT('SELECT %1$s FROM temp_tbl_src_data_range', replace_dest_metric_column)
+            LOOP
+                EXECUTE FORMAT('
+                   SELECT 
+                    _timescaledb_internal.time_literal_sql(min, ''%3$s'') as min, 
+                    _timescaledb_internal.time_literal_sql(max, ''%3$s'') as max
+                    FROM temp_tbl_src_data_range 
+                    WHERE %1$s = %2$s
+                    LIMIT 1'
+                   , replace_dest_metric_column
+                   , metric_id
+                   , dimension_row.column_type)
+                INTO src_r_start, src_r_end;
 
-				-- delete only data within source's range
-				del_r_start = GREATEST(src_r_start, r_start);
-				del_r_end = LEAST(src_r_end, r_end);
-				-- make inclusive if end is the same as source end
-				SELECT CASE WHEN del_r_end = src_r_end THEN '<=' ELSE '<' END
-				INTO del_r_end_dir;
+                -- delete only data within source's range
+                del_r_start = GREATEST(src_r_start, r_start);
+                del_r_end = LEAST(src_r_end, r_end);
+                -- make inclusive if end is the same as source end
+                SELECT CASE WHEN del_r_end = src_r_end THEN '<=' ELSE '<' END
+                INTO del_r_end_dir;
 
-				EXECUTE FORMAT(
-					unformatted_replace_stmt
-					, dest 
-					, replace_dest_metric_column
-					, metric_id
-					, dimension_row.column_name
-					, del_r_start 
-					, del_r_end
-					, del_r_end_dir
-					);
-				GET DIAGNOSTICS affected = ROW_COUNT;
-				RAISE NOTICE '% rows deleted from destination for % in range % to %', affected, metric_id, del_r_start, del_r_end ;
-			END LOOP;
+                EXECUTE FORMAT(
+                    unformatted_replace_stmt
+                    , dest 
+                    , replace_dest_metric_column
+                    , metric_id
+                    , dimension_row.column_name
+                    , del_r_start 
+                    , del_r_end
+                    , del_r_end_dir
+                    );
+                GET DIAGNOSTICS affected = ROW_COUNT;
+                RAISE NOTICE '% rows deleted from destination for % in range % to %', affected, metric_id, del_r_start, del_r_end ;
+            END LOOP;
         END IF;
 
         EXECUTE FORMAT(unformatted_move_stmt
@@ -374,13 +374,13 @@ BEGIN
     COMMIT;
 
     --Move our job back to where it was
-	IF compression_job_push THEN
-		SELECT move_compression_job(hypertable_row.id, hypertable_row.schema_name, hypertable_row.table_name, old_compression_job_time) INTO old_compression_job_time;
-		COMMIT;
-	END IF;
+    IF compression_job_push THEN
+        SELECT move_compression_job(hypertable_row.id, hypertable_row.schema_name, hypertable_row.table_name, old_compression_job_time) INTO old_compression_job_time;
+        COMMIT;
+    END IF;
 
-	-- clean up
-	DROP TABLE IF EXISTS temp_tbl_src_data_range;
+    -- clean up
+    DROP TABLE IF EXISTS temp_tbl_src_data_range;
 END;
 
 $proc$
